@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SpotBugs findings we accept on purpose. Keep each one narrow and say why. -->
+<FindBugsFilter xmlns="https://github.com/spotbugs/filter/3.0.0">
+
+    <!--
+        "May expose internal representation": raised for every Spring bean that keeps an injected
+        dependency, and for records/entities that hold a List, Map or byte[]. Copying all of these
+        would only cost memory; the objects are never shared outside a single request.
+    -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!--
+        JwtService rejects a too-short secret in its constructor. The finalizer attack this warns
+        about needs an attacker-controlled subclass, which a Spring singleton never has.
+    -->
+    <Match>
+        <Class name="com.zachary.sitecheck.service.JwtService"/>
+        <Bug pattern="CT_CONSTRUCTOR_THROW"/>
+    </Match>
+</FindBugsFilter>

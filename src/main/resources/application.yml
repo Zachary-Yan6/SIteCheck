@@ -1,0 +1,38 @@
+spring:
+  application:
+    name: SiteCheck
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/sitecheck}
+    username: ${DB_USERNAME:sitecheck}
+    password: ${DB_PASSWORD:sitecheck}
+
+# MyBatis-Plus - extra type handlers (UUID <-> Postgres uuid)
+mybatis-plus:
+  type-handlers-package: com.zachary.sitecheck.config.mybatis
+
+sitecheck:
+  # JWT - the default secret is for local development only; set JWT_SECRET (32+ bytes) in any deployed environment.
+  jwt:
+    secret: ${JWT_SECRET:local-dev-secret-change-me-0123456789abcdef}
+    ttl: ${JWT_TTL:PT24H}
+
+  # S3 photo storage - defaults point at LocalStack from docker-compose.yml.
+  # On AWS set S3_ENDPOINT to empty so the real S3 endpoint and the EC2 instance role are used.
+  s3:
+    bucket: ${S3_BUCKET:sitecheck-photos}
+    region: ${AWS_REGION:eu-west-1}
+    endpoint: ${S3_ENDPOINT:http://localhost:4566}
+    # Testing on a real phone? Set this to http://<your PC's LAN IP>:4566
+    presign-endpoint: ${S3_PRESIGN_ENDPOINT:}
+    presign-ttl: PT10M
+    max-photo-bytes: 1048576
+
+  # Push reminders (FR-27 to FR-29), sent through Expo's push service.
+  push:
+    expo-url: https://exp.host/--/api/v2/push/send
+    # Only needed if "enhanced push security" is enabled for the Expo project.
+    access-token: ${EXPO_ACCESS_TOKEN:}
+  reminders:
+    enabled: ${REMINDERS_ENABLED:true}
+    # Every day at 07:00 Irish time (the job's zone is Europe/Dublin).
+    cron: ${REMINDERS_CRON:0 0 7 * * *}

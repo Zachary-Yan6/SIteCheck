@@ -1,0 +1,9 @@
+# Only .mvn/, mvnw, pom.xml and src/ are needed to build the image.
+target/
+.git/
+.github/
+.idea/
+*.iml
+docker/
+docker-compose.yml
+HELP.md

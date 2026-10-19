@@ -1,0 +1,84 @@
+# Local development infrastructure for the SiteCheck backend.
+#
+# Start:   docker compose up -d
+# Stop:    docker compose down          (keeps data)
+# Reset:   docker compose down -v       (deletes the Postgres volume too)
+#
+# The Spring Boot app itself runs from the IDE / ./mvnw spring-boot:run and
+# connects to these services on localhost.
+#
+# To run the app in a container as well (like on the server):
+#          docker compose --profile app up -d --build
+
+services:
+
+  # PostgreSQL - main database. Schema is created by Flyway on app startup,
+  # so this container only needs an empty database.
+  # Credentials match the defaults in src/main/resources/application.yml
+  # (DB_URL / DB_USERNAME / DB_PASSWORD).
+  postgres:
+    image: postgres:17-alpine          # same image the Testcontainers tests use
+    container_name: sitecheck-postgres
+    environment:
+      POSTGRES_DB: sitecheck
+      POSTGRES_USER: sitecheck
+      POSTGRES_PASSWORD: sitecheck
+    ports:
+      - "5433:5432"   # 5433 on the host: 5432 is taken by a local PostgreSQL install
+    volumes:
+      - postgres-data:/var/lib/postgresql/data   # persist data across restarts
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sitecheck -d sitecheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # LocalStack - local stand-in for AWS S3, so photo uploads via presigned
+  # URLs (FR-22) can be developed without a real AWS account.
+  # S3 endpoint: http://localhost:4566 (any access key / secret works, e.g. "test").
+  # Note: a phone on the same Wi-Fi must use your PC's LAN IP instead of
+  # localhost when uploading to a presigned URL.
+  localstack:
+    image: localstack/localstack:4.4   # pinned: newer "latest" images may require a LocalStack auth token
+    container_name: sitecheck-localstack
+    environment:
+      SERVICES: s3                     # only start S3 to keep it light
+      AWS_DEFAULT_REGION: eu-west-1    # Ireland
+      S3_SKIP_SIGNATURE_VALIDATION: "0"   # check presigned URL signatures like real S3 does
+    ports:
+      - "4566:4566"
+    volumes:
+      # Scripts in ready.d run once LocalStack is up - creates the photo bucket.
+      - ./docker/localstack/init-s3.sh:/etc/localstack/init/ready.d/init-s3.sh:ro
+    healthcheck:
+      test: ["CMD", "awslocal", "s3api", "head-bucket", "--bucket", "sitecheck-photos"]   # healthy once the bucket exists
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # The backend itself, built from the Dockerfile. Only started with "--profile app", so the
+  # usual "docker compose up -d" still gives just the infrastructure for running from the IDE.
+  backend:
+    profiles: ["app"]
+    build: .
+    image: sitecheck-backend
+    container_name: sitecheck-backend
+    environment:
+      # Inside the compose network services are reached by name, on their container ports.
+      DB_URL: jdbc:postgresql://postgres:5432/sitecheck
+      S3_ENDPOINT: http://localstack:4566
+      # Presigned URLs are opened by the phone, and the signature only matches the exact host in
+      # the URL, so it must be an address the phone can reach: 10.0.2.2 is the PC as seen from the
+      # Android emulator; for a real phone set S3_PRESIGN_ENDPOINT=http://<your PC's LAN IP>:4566.
+      S3_PRESIGN_ENDPOINT: ${S3_PRESIGN_ENDPOINT:-http://10.0.2.2:4566}
+      JWT_SECRET: ${JWT_SECRET:-local-dev-secret-change-me-0123456789abcdef}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

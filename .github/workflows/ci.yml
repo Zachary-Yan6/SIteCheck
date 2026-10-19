@@ -1,0 +1,52 @@
+# Backend CI (NFR-09): run every test, then check the Docker image still builds.
+name: Backend CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# A newer push to the same branch cancels the run still going for the old one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (JUnit + Testcontainers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # GitHub's Ubuntu runners have Docker, so Testcontainers starts real Postgres and
+      # LocalStack here, exactly as on a developer machine.
+      - name: Build and test
+        run: ./mvnw -B verify
+
+  docker:
+    name: Docker image
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      # Build only (no registry push yet). The GitHub Actions cache keeps the Maven
+      # dependency layer between runs.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          tags: sitecheck-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
