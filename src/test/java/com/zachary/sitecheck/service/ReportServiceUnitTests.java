@@ -140,6 +140,41 @@ class ReportServiceUnitTests {
                 .contains("[signature could not be displayed]");
     }
 
+    @Test
+    void namesAndNotesBeyondWesternEuropeanLettersArePrinted() throws IOException {
+        UUID id = UUID.randomUUID();
+        when(managerMapper.selectReportInspections(eq(SITE_ID), any(), any(), anyInt())).thenReturn(List.of(
+                new ReportInspectionRow(id, "Scaffold Inspection", "Łukasz Wójcik", SUBMITTED, png())));
+        when(managerMapper.selectReportResults(List.of(id))).thenReturn(List.of(
+                result(id, 10L, 1, "Guard rails", "FAIL", "Șurub lipsă, nivelul 3")));
+        when(photoMapper.selectList(any())).thenReturn(List.of());
+
+        assertThat(text(service.siteReport(SITE_ID, FROM, TO)))
+                .contains("Łukasz Wójcik")
+                .contains("Șurub lipsă, nivelul 3");
+    }
+
+    @Test
+    void photosPastTheSizeBudgetAreLeftOutWithANote() throws IOException {
+        UUID id = UUID.randomUUID();
+        when(managerMapper.selectReportInspections(eq(SITE_ID), any(), any(), anyInt()))
+                .thenReturn(List.of(inspection(id, png())));
+        when(managerMapper.selectReportResults(List.of(id)))
+                .thenReturn(List.of(result(id, 11L, 1, "Guard rails", "FAIL", "Missing")));
+        when(photoMapper.selectList(any())).thenReturn(List.of(
+                photo(id, 11L, "photos/first.jpg"),
+                photo(id, 11L, "photos/second.jpg")));
+        byte[] jpeg = jpeg();
+        when(photoFiles.read("photos/first.jpg")).thenReturn(Optional.of(jpeg));
+        service.maxPhotoBytes = jpeg.length;  // room for exactly one photo
+
+        // The note wraps inside the narrow photo cell, so compare with line breaks ignored.
+        String text = text(service.siteReport(SITE_ID, FROM, TO)).replaceAll("\\s+", " ");
+
+        assertThat(text).contains("[photo left out - report size limit; choose a shorter period]");
+        verify(photoFiles, never()).read("photos/second.jpg");
+    }
+
     // ---------------------------------------------------------------- helpers
 
     private static ReportInspectionRow inspection(UUID id, byte[] signature) {

@@ -64,6 +64,8 @@ services:
     image: sitecheck-backend
     container_name: sitecheck-backend
     environment:
+      # Demo data and the local JWT secret (application-dev.yml) - this compose file is for development only.
+      SPRING_PROFILES_ACTIVE: dev
       # Inside the compose network services are reached by name, on their container ports.
       DB_URL: jdbc:postgresql://postgres:5432/sitecheck
       S3_ENDPOINT: http://localstack:4566

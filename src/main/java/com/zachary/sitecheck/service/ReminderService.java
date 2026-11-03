@@ -83,7 +83,9 @@ public class ReminderService {
             } else if (ticket.deviceNotRegistered()) {
                 deviceTokenMapper.delete(messages.get(i).to()); // app uninstalled - stop sending there
             } else {
-                log.warn("Push to {} failed: {} {}", messages.get(i).to(), ticket.message(), ticket.details());
+                // Not the token or the full details: a push token is enough to send to that phone.
+                log.warn("Push to a device failed: {} ({})", ticket.message(),
+                        ticket.details() == null ? null : ticket.details().get("error"));
             }
         }
         log.info("Sent {} reminder(s) for {} site(s) on {}", accepted, claimed.size(), today);

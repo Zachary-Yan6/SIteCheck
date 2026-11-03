@@ -30,6 +30,9 @@ public class TestcontainersConfiguration {
 		return registry -> {
 			registry.add("sitecheck.s3.endpoint", () -> localStack.getEndpoint().toString());
 			registry.add("sitecheck.s3.presign-endpoint", () -> localStack.getEndpoint().toString());
+			// Tests run against the demo seed data, like the dev profile.
+			registry.add("spring.flyway.locations", () -> "classpath:db/migration,classpath:db/demo");
+			registry.add("sitecheck.jwt.secret", () -> "test-only-secret-0123456789abcdef0123456789");
 			// No scheduled reminders during tests, and never a real call to Expo.
 			registry.add("sitecheck.reminders.enabled", () -> "false");
 			registry.add("sitecheck.push.expo-url", () -> "http://localhost:9/expo-not-used-in-tests");

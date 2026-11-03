@@ -19,6 +19,7 @@ import com.zachary.sitecheck.mapper.PhotoMapper;
 import com.zachary.sitecheck.mapper.SiteTemplateMapper;
 import com.zachary.sitecheck.mapper.TemplateItemMapper;
 import com.zachary.sitecheck.security.AuthUser;
+import java.time.Duration;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
@@ -30,6 +31,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class InspectionService {
+
+    /** timestamptz resolution. */
+    private static final Duration STORED_PRECISION = Duration.ofNanos(1_000);
 
     private final InspectionMapper inspectionMapper;
     private final InspectionResultMapper resultMapper;
@@ -58,30 +62,32 @@ public class InspectionService {
     public SubmitOutcome submit(AuthUser user, SubmitInspectionRequest request) {
         // 1. Retry of something we already have? Answer before re-validating, so a retry still
         //    succeeds even if, say, the inspector has been unassigned from the site since.
-        Optional<InspectionReceipt> existing = findExisting(user, request.id());
+        Optional<InspectionReceipt> existing = findExisting(user, request);
         if (existing.isPresent()) {
             return new SubmitOutcome(existing.get(), false);
         }
 
         // 2. New inspection: check access and content.
-        siteAccessService.requireAssigned(user, request.siteId());
+        siteAccessService.requireCanSubmit(user, request.siteId(), request.startedAt());
         validate(request);
 
         // 3. Store it. 0 rows means a concurrent retry of the same request committed first.
         if (inspectionMapper.insertIfAbsent(toInspection(user, request)) == 0) {
-            return new SubmitOutcome(findExisting(user, request.id()).orElseThrow(), false);
+            return new SubmitOutcome(findExisting(user, request).orElseThrow(), false);
         }
         resultMapper.insert(request.results().stream().map(r -> toResult(request.id(), r)).toList());
         if (!request.photos().isEmpty()) {
             photoMapper.insert(request.photos().stream().map(p -> toPhoto(request.id(), p)).toList());
         }
-        return new SubmitOutcome(findExisting(user, request.id()).orElseThrow(), true);
+        return new SubmitOutcome(findExisting(user, request).orElseThrow(), true);
     }
 
     /** Receipt for an already stored inspection, or empty if there is none with that id. */
-    private Optional<InspectionReceipt> findExisting(AuthUser user, UUID id) {
+    private Optional<InspectionReceipt> findExisting(AuthUser user, SubmitInspectionRequest request) {
+        UUID id = request.id();
         Inspection inspection = inspectionMapper.selectOne(Wrappers.<Inspection>lambdaQuery()
-                .select(Inspection::getId, Inspection::getInspectorId, Inspection::getReceivedAt)  // skip the signature bytes
+                .select(Inspection::getId, Inspection::getInspectorId, Inspection::getSiteId,  // skip the signature bytes
+                        Inspection::getTemplateId, Inspection::getSubmittedAt, Inspection::getReceivedAt)
                 .eq(Inspection::getId, id));
         if (inspection == null) {
             return Optional.empty();
@@ -91,12 +97,27 @@ public class InspectionService {
             // so this is a buggy or malicious client - refuse rather than leak or overwrite it.
             throw ApiException.conflict("Inspection id already used");
         }
+        if (!isSameInspection(inspection, request)) {
+            // A retry is the same signed record sent again. Different content under the same id is
+            // a client bug; answering with the old receipt would hide that the new data was dropped.
+            throw ApiException.conflict("Inspection id already used for a different inspection");
+        }
         List<UUID> pendingPhotoIds = photoMapper.selectList(Wrappers.<Photo>lambdaQuery()
                         .select(Photo::getId)
                         .eq(Photo::getInspectionId, id)
                         .eq(Photo::getStatus, PhotoStatus.PENDING))
                 .stream().map(Photo::getId).toList();
         return Optional.of(new InspectionReceipt(inspection.getId(), inspection.getReceivedAt(), pendingPhotoIds));
+    }
+
+    /**
+     * Signed inspections are read-only, so a genuine retry always has the same site, check and signing
+     * time. Postgres keeps microseconds (rounded), so a time sent with nanoseconds comes back a little off.
+     */
+    private static boolean isSameInspection(Inspection stored, SubmitInspectionRequest request) {
+        return stored.getSiteId().equals(request.siteId())
+                && stored.getTemplateId().equals(request.templateId())
+                && Duration.between(stored.getSubmittedAt(), request.submittedAt()).abs().compareTo(STORED_PRECISION) < 0;
     }
 
     /**
@@ -139,6 +160,11 @@ public class InspectionService {
                 throw ApiException.badRequest("Photo " + photo.id() + " is listed twice");
             }
             itemsWithPhotos.add(photo.templateItemId());
+        }
+        // Photo ids come from the phone too. One that is already stored (in another inspection) would only
+        // fail on the primary key inside the batch insert - as a 500 - so answer it here as a clear 409.
+        if (!photoIds.isEmpty() && photoMapper.exists(Wrappers.<Photo>lambdaQuery().in(Photo::getId, photoIds))) {
+            throw ApiException.conflict("A photo id in this inspection is already used");
         }
 
         // FR-12: a FAIL needs a note and at least one photo.

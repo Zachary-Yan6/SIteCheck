@@ -3,7 +3,6 @@ package com.zachary.sitecheck.service;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.zachary.sitecheck.dto.UserResponse;
 import com.zachary.sitecheck.entity.Role;
-import com.zachary.sitecheck.entity.SiteInspector;
 import com.zachary.sitecheck.entity.User;
 import com.zachary.sitecheck.exception.ApiException;
 import com.zachary.sitecheck.mapper.SiteInspectorMapper;
@@ -61,13 +60,14 @@ public class SiteAssignmentService {
         siteInspectorMapper.insertIfAbsent(siteId, userId);
     }
 
-    /** Idempotent: removing someone who isn't on the site changes nothing. */
+    /**
+     * Idempotent: removing someone who isn't on the site changes nothing. The ended assignment is
+     * kept, so inspections they started before this can still be uploaded (see SiteAccessService).
+     */
     @Transactional
     public void unassign(Long siteId, Long userId) {
         requireSite(siteId);
-        siteInspectorMapper.delete(Wrappers.<SiteInspector>lambdaQuery()
-                .eq(SiteInspector::getSiteId, siteId)
-                .eq(SiteInspector::getUserId, userId));
+        siteInspectorMapper.unassign(siteId, userId);
     }
 
     private void requireSite(Long siteId) {

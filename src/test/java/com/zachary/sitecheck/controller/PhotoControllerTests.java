@@ -37,7 +37,8 @@ class PhotoControllerTests {
 
     private static final String AOIFE = "aoife.murphy@sitecheck.demo";
     private static final String LIAM = "liam.obrien@sitecheck.demo";
-    private static final byte[] JPEG = new byte[2048];  // contents don't matter, only size and type
+    /** Only the JPEG start marker matters to the server (plus size and type); the rest can be zeros. */
+    private static final byte[] JPEG = jpegOfSize(2048);
 
     private final HttpClient http = HttpClient.newHttpClient();
 
@@ -131,7 +132,29 @@ class PhotoControllerTests {
         confirm(AOIFE, photoId).andExpect(status().isNotFound());
     }
 
+    @Test
+    void uploadThatIsNotAJpegIsConflictAndRemoved() throws Exception {
+        UUID photoId = UUID.randomUUID();
+        submitInspectionWithPhoto(AOIFE, UUID.randomUUID(), photoId);
+        byte[] notAJpeg = new byte[JPEG.length];
+
+        String uploadUrl = requestUploadUrl(AOIFE, photoId, notAJpeg.length).andReturn().getResponse().getContentAsString();
+        assertThat(put(JsonPath.read(uploadUrl, "$.url"), notAJpeg)).isEqualTo(200);
+
+        confirm(AOIFE, photoId).andExpect(status().isConflict());
+        String key = jdbc.queryForObject("SELECT s3_key FROM photos WHERE id = ?", String.class, photoId);
+        assertThat(s3Client.listObjectsV2(r -> r.bucket(s3Properties.bucket()).prefix(key)).keyCount()).isZero();
+    }
+
     // ---------------------------------------------------------------- helpers
+
+    private static byte[] jpegOfSize(int size) {
+        byte[] bytes = new byte[size];
+        bytes[0] = (byte) 0xFF;
+        bytes[1] = (byte) 0xD8;
+        bytes[2] = (byte) 0xFF;
+        return bytes;
+    }
 
     /** Minimal valid inspection at Cork (assigned to both inspectors): one PASS item with one photo. */
     private ResultActions submitInspectionWithPhoto(String email, UUID inspectionId, UUID photoId) throws Exception {

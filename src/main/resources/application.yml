@@ -5,15 +5,20 @@ spring:
     url: ${DB_URL:jdbc:postgresql://localhost:5433/sitecheck}
     username: ${DB_USERNAME:sitecheck}
     password: ${DB_PASSWORD:sitecheck}
+  # Outgoing HTTP calls (Expo push): a hung Expo must not hold the reminder job's thread for ever.
+  http:
+    client:
+      connect-timeout: 5s
+      read-timeout: 15s
 
 # MyBatis-Plus - extra type handlers (UUID <-> Postgres uuid)
 mybatis-plus:
   type-handlers-package: com.zachary.sitecheck.config.mybatis
 
 sitecheck:
-  # JWT - the default secret is for local development only; set JWT_SECRET (32+ bytes) in any deployed environment.
+  # JWT - no default: set JWT_SECRET (a random value of 32+ bytes). The dev profile provides a local one.
   jwt:
-    secret: ${JWT_SECRET:local-dev-secret-change-me-0123456789abcdef}
+    secret: ${JWT_SECRET:}
     ttl: ${JWT_TTL:PT24H}
 
   # S3 photo storage - defaults point at LocalStack from docker-compose.yml.

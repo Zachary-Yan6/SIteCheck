@@ -34,7 +34,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.HttpStatus;
+import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
@@ -122,6 +124,7 @@ class PhotoServiceUnitTests {
         when(photoMapper.selectById(photoId)).thenReturn(photo(PhotoStatus.PENDING), uploaded);
         when(inspectionMapper.exists(any())).thenReturn(true);
         when(s3Client.headObject(any(Consumer.class))).thenReturn(HeadObjectResponse.builder().contentLength(400_000L).build());
+        s3FileStartsWith(0xFF, 0xD8, 0xFF);
 
         PhotoStatusResponse response = service.confirmUpload(AOIFE, photoId);
 
@@ -160,7 +163,27 @@ class PhotoServiceUnitTests {
         verify(photoMapper, never()).update(any());
     }
 
+    @Test
+    void uploadThatIsNotAJpegIsDeletedAndMustBeRepeated() {
+        ownPhoto(PhotoStatus.PENDING);
+        when(s3Client.headObject(any(Consumer.class))).thenReturn(HeadObjectResponse.builder().contentLength(400L).build());
+        s3FileStartsWith('<', 'h', 't');  // e.g. an HTML error page saved instead of the photo
+
+        expectStatus(() -> service.confirmUpload(AOIFE, photoId), HttpStatus.CONFLICT);
+        verify(s3Client).deleteObject(any(Consumer.class));
+        verify(photoMapper, never()).update(any());
+    }
+
     // ---------------------------------------------------------------- helpers
+
+    private void s3FileStartsWith(int... bytes) {
+        byte[] start = new byte[bytes.length];
+        for (int i = 0; i < bytes.length; i++) {
+            start[i] = (byte) bytes[i];
+        }
+        when(s3Client.getObjectAsBytes(any(Consumer.class)))
+                .thenReturn(ResponseBytes.fromByteArray(GetObjectResponse.builder().build(), start));
+    }
 
     private void ownPhoto(PhotoStatus status) {
         when(photoMapper.selectById(photoId)).thenReturn(photo(status));

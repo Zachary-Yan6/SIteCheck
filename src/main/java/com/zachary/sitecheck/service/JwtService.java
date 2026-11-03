@@ -27,7 +27,7 @@ public class JwtService {
 
     // secret, ttl
     public JwtService(JwtProperties properties) {
-        // Throws WeakKeyException on startup if the secret is shorter than 256 bits.
+        // Length is already checked by JwtProperties (at least 256 bits).
         this.key = Keys.hmacShaKeyFor(properties.secret().getBytes(StandardCharsets.UTF_8));
         this.properties = properties;
     }

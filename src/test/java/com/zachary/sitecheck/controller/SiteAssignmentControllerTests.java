@@ -12,6 +12,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.jayway.jsonpath.JsonPath;
 import com.zachary.sitecheck.TestcontainersConfiguration;
+import java.time.OffsetDateTime;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -21,6 +22,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.ResultActions;
 
 /** Managers assigning inspectors to sites. Uses freshly registered inspectors so seed assignments stay as they are. */
 @Import(TestcontainersConfiguration.class)
@@ -71,6 +73,26 @@ class SiteAssignmentControllerTests {
     }
 
     @Test
+    void inspectionStartedBeforeUnassignmentCanStillBeUploaded() throws Exception {
+        NewInspector newbie = registerInspector();
+        long cork = siteId("Cork Docklands Office Block");
+        String path = "/api/manager/sites/" + cork + "/inspectors/" + newbie.id();
+        String manager = bearer(SIOBHAN);
+
+        mockMvc.perform(put(path).header("Authorization", manager)).andExpect(status().isNoContent());
+        // Assigned two days ago, unassigned now.
+        jdbc.update("UPDATE site_inspectors SET assigned_at = now() - interval '2 days' WHERE site_id = ? AND user_id = ?",
+                cork, newbie.id());
+        mockMvc.perform(delete(path).header("Authorization", manager)).andExpect(status().isNoContent());
+
+        // Filled in offline yesterday, while still on the site: accepted.
+        submitPassingScaffoldCheck(newbie, cork, OffsetDateTime.now().minusDays(1)).andExpect(status().isCreated());
+        // Started before the assignment began, or after it ended: refused.
+        submitPassingScaffoldCheck(newbie, cork, OffsetDateTime.now().minusDays(3)).andExpect(status().isForbidden());
+        submitPassingScaffoldCheck(newbie, cork, OffsetDateTime.now().plusMinutes(1)).andExpect(status().isForbidden());
+    }
+
+    @Test
     void rejectsManagersAndUnknownIds() throws Exception {
         long cork = siteId("Cork Docklands Office Block");
         long siobhanId = jdbc.queryForObject("SELECT id FROM users WHERE email = ?", Long.class, SIOBHAN);
@@ -108,6 +130,24 @@ class SiteAssignmentControllerTests {
                 .andReturn().getResponse().getContentAsString();
         return new NewInspector(((Number) JsonPath.read(body, "$.user.id")).longValue(),
                 "Bearer " + JsonPath.read(body, "$.token"));
+    }
+
+    /** One PASS answer is enough for the server; it doesn't require every item (see InspectionService). */
+    private ResultActions submitPassingScaffoldCheck(NewInspector inspector, long siteId, OffsetDateTime startedAt)
+            throws Exception {
+        long templateId = jdbc.queryForObject(
+                "SELECT id FROM inspection_templates WHERE name = 'Scaffold Inspection'", Long.class);
+        long itemId = jdbc.queryForObject(
+                "SELECT min(id) FROM template_items WHERE template_id = ?", Long.class, templateId);
+        return mockMvc.perform(post("/api/inspections")
+                .header("Authorization", inspector.bearer())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"id": "%s", "siteId": %d, "templateId": %d, "startedAt": "%s", "submittedAt": "%s",
+                         "signaturePng": "iVBORw0KGgo=",
+                         "results": [{"templateItemId": %d, "result": "PASS"}]}
+                        """.formatted(UUID.randomUUID(), siteId, templateId, startedAt, startedAt.plusMinutes(20),
+                        itemId)));
     }
 
     private long siteId(String name) {

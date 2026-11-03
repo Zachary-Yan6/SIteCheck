@@ -12,6 +12,7 @@ import com.zachary.sitecheck.mapper.InspectionMapper;
 import com.zachary.sitecheck.mapper.PhotoMapper;
 import com.zachary.sitecheck.security.AuthUser;
 import java.time.OffsetDateTime;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
@@ -26,7 +27,7 @@ import software.amazon.awssdk.services.s3.presigner.model.PresignedPutObjectRequ
  * <ol>
  *   <li>{@link #createUploadUrl} - the app asks for a short-lived presigned PUT URL</li>
  *   <li>the app PUTs the JPEG to that URL (S3 checks the signature, size and content type)</li>
- *   <li>{@link #confirmUpload} - the app says it's done; we check S3 really has it, then mark UPLOADED</li>
+ *   <li>{@link #confirmUpload} - the app says it's done; we check S3 really has a JPEG there, then mark UPLOADED</li>
  * </ol>
  * Photos only exist here after their inspection was submitted, which gives the
  * "record first, then its photos" order of FR-21. Every step is safe to repeat.
@@ -35,6 +36,7 @@ import software.amazon.awssdk.services.s3.presigner.model.PresignedPutObjectRequ
 public class PhotoService {
 
     private static final String CONTENT_TYPE = "image/jpeg";
+    private static final byte[] JPEG_START = {(byte) 0xFF, (byte) 0xD8, (byte) 0xFF};
 
     private final PhotoMapper photoMapper;
     private final InspectionMapper inspectionMapper;
@@ -90,6 +92,12 @@ public class PhotoService {
         if (head.contentLength() > properties.maxPhotoBytes()) {
             throw ApiException.badRequest("Uploaded photo is larger than " + properties.maxPhotoBytes() + " bytes");
         }
+        if (!isJpeg(photo.getS3Key())) {
+            // The signed Content-Type is only a header; the bytes could still be anything (a broken
+            // upload, the wrong file). Remove it so the app's next try starts clean.
+            s3Client.deleteObject(r -> r.bucket(properties.bucket()).key(photo.getS3Key()));
+            throw ApiException.conflict("Uploaded file is not a JPEG - upload it again");
+        }
 
         // "AND status = PENDING" keeps the first uploaded_at if two confirms race.
         OffsetDateTime now = OffsetDateTime.now();
@@ -128,6 +136,13 @@ public class PhotoService {
             }
             throw e;  // S3 down etc. -> 500, the app retries later
         }
+    }
+
+    /** Every JPEG starts with the SOI marker FF D8 FF; only those three bytes are fetched. */
+    private boolean isJpeg(String key) {
+        byte[] start = s3Client.getObjectAsBytes(r -> r.bucket(properties.bucket()).key(key).range("bytes=0-2"))
+                .asByteArray();
+        return Arrays.equals(start, JPEG_START);
     }
 
     private static PhotoStatusResponse toResponse(Photo photo) {

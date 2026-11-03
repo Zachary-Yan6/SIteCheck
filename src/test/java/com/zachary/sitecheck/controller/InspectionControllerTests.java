@@ -3,6 +3,7 @@ package com.zachary.sitecheck.controller;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -14,6 +15,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -64,6 +69,50 @@ class InspectionControllerTests {
     }
 
     @Test
+    void twoCopiesArrivingAtTheSameMomentStoreOneInspection() throws Exception {
+        // The phone retries while the first upload is still in flight: both requests race for the insert.
+        Map<String, Object> request = validScaffoldInspection(cork());
+        String body = objectMapper.writeValueAsString(request);
+        String auth = bearer(AOIFE);
+        CountDownLatch start = new CountDownLatch(1);
+
+        List<Integer> statuses = new ArrayList<>();
+        try (ExecutorService pool = Executors.newFixedThreadPool(2)) {
+            List<Future<Integer>> calls = new ArrayList<>();
+            for (int i = 0; i < 2; i++) {
+                calls.add(pool.submit(() -> {
+                    start.await();
+                    return mockMvc.perform(post("/api/inspections")
+                                    .header("Authorization", auth)
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .content(body))
+                            .andReturn().getResponse().getStatus();
+                }));
+            }
+            start.countDown();
+            for (Future<Integer> call : calls) {
+                statuses.add(call.get());
+            }
+        }
+
+        assertThat(statuses).containsExactlyInAnyOrder(201, 200);
+        UUID id = UUID.fromString((String) request.get("id"));
+        assertThat(count("SELECT count(*) FROM inspections WHERE id = ?", id)).isEqualTo(1);
+        assertThat(count("SELECT count(*) FROM inspection_results WHERE inspection_id = ?", id)).isEqualTo(6);
+    }
+
+    @Test
+    void sameIdWithDifferentContentIsConflict() throws Exception {
+        Map<String, Object> request = validScaffoldInspection(cork());
+        submit(AOIFE, request).andExpect(status().isCreated());
+
+        request.put("submittedAt", "2026-10-14T10:00:00+01:00");  // not a retry: something else signed later
+        submit(AOIFE, request)
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.detail").value("Inspection id already used for a different inspection"));
+    }
+
+    @Test
     void inspectorCannotSubmitForSomeoneElsesSite() throws Exception {
         // Acceptance scenario 5: Galway is only assigned to Liam.
         Map<String, Object> request = validScaffoldInspection(siteId("Galway Student Residence"));
@@ -82,6 +131,22 @@ class InspectionControllerTests {
         Map<String, Object> request = validScaffoldInspection(cork());  // Cork is assigned to both
         submit(LIAM, request).andExpect(status().isCreated());
         submit(AOIFE, request).andExpect(status().isConflict());
+    }
+
+    @Test
+    void photoIdAlreadyUsedIsConflictAndStoresNothing() throws Exception {
+        Map<String, Object> first = validScaffoldInspection(cork());
+        submit(AOIFE, first).andExpect(status().isCreated());
+
+        // A different inspection reusing the first one's photo id: refused before anything is stored.
+        Map<String, Object> second = validScaffoldInspection(cork());
+        photoOf(second).put("id", photoIdOf(first));
+        submit(AOIFE, second)
+                .andExpect(status().isConflict())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.detail").value("A photo id in this inspection is already used"));
+        assertThat(count("SELECT count(*) FROM inspections WHERE id = ?", UUID.fromString((String) second.get("id"))))
+                .isZero();
     }
 
     @Test
@@ -159,8 +224,12 @@ class InspectionControllerTests {
     }
 
     @SuppressWarnings("unchecked")
+    private static Map<String, Object> photoOf(Map<String, Object> request) {
+        return ((List<Map<String, Object>>) request.get("photos")).getFirst();
+    }
+
     private static String photoIdOf(Map<String, Object> request) {
-        return (String) ((List<Map<String, Object>>) request.get("photos")).getFirst().get("id");
+        return (String) photoOf(request).get("id");
     }
 
     private ResultActions submit(String email, Map<String, Object> request) throws Exception {

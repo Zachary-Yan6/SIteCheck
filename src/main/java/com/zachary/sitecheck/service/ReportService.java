@@ -9,6 +9,7 @@ import com.lowagie.text.Image;
 import com.lowagie.text.PageSize;
 import com.lowagie.text.Paragraph;
 import com.lowagie.text.Phrase;
+import com.lowagie.text.pdf.BaseFont;
 import com.lowagie.text.pdf.PdfPCell;
 import com.lowagie.text.pdf.PdfPTable;
 import com.lowagie.text.pdf.PdfWriter;
@@ -24,6 +25,8 @@ import com.zachary.sitecheck.mapper.ReportResultRow;
 import com.zachary.sitecheck.mapper.SiteMapper;
 import java.awt.Color;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
@@ -47,16 +50,25 @@ public class ReportService {
 
     /** Keeps a report (and the memory to build it) a sensible size; a shorter period finds the rest. */
     static final int MAX_INSPECTIONS = 100;
+    /**
+     * Photo bytes one report may embed. 100 inspections can hold thousands of photos of up to 1MB, and
+     * the whole PDF is built in memory, so past this the remaining photos get a placeholder instead.
+     */
+    static final long MAX_PHOTO_BYTES = 40L * 1024 * 1024;
 
     private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("d MMM yyyy", Locale.ENGLISH);
     private static final DateTimeFormatter DAY_TIME = DateTimeFormatter.ofPattern("d MMM yyyy, HH:mm", Locale.ENGLISH);
 
-    private static final Font TITLE = new Font(Font.HELVETICA, 18, Font.BOLD);
-    private static final Font HEADING = new Font(Font.HELVETICA, 12, Font.BOLD);
-    private static final Font BODY = new Font(Font.HELVETICA, 10, Font.NORMAL);
-    private static final Font SMALL = new Font(Font.HELVETICA, 9, Font.NORMAL, Color.DARK_GRAY);
-    private static final Font TABLE_HEADER = new Font(Font.HELVETICA, 9, Font.BOLD, Color.WHITE);
-    private static final Font FAIL = new Font(Font.HELVETICA, 10, Font.BOLD, new Color(0xB7, 0x1C, 0x1C));
+    // Liberation Sans, embedded: the built-in Helvetica only has Western European letters, so names
+    // and notes in e.g. Polish, Lithuanian or Romanian ("Łukasz", "Šarūnas", "Ștefan") would lose characters.
+    private static final BaseFont REGULAR = embeddedFont("liberation/LiberationSans-Regular.ttf");
+    private static final BaseFont BOLD = embeddedFont("liberation/LiberationSans-Bold.ttf");
+    private static final Font TITLE = new Font(BOLD, 18, Font.NORMAL);
+    private static final Font HEADING = new Font(BOLD, 12, Font.NORMAL);
+    private static final Font BODY = new Font(REGULAR, 10, Font.NORMAL);
+    private static final Font SMALL = new Font(REGULAR, 9, Font.NORMAL, Color.DARK_GRAY);
+    private static final Font TABLE_HEADER = new Font(BOLD, 9, Font.NORMAL, Color.WHITE);
+    private static final Font FAIL = new Font(BOLD, 10, Font.NORMAL, new Color(0xB7, 0x1C, 0x1C));
     private static final Color HEADER_BACKGROUND = new Color(0x15, 0x65, 0xC0);
     private static final Color FAIL_BACKGROUND = new Color(0xFD, 0xEC, 0xEA);
 
@@ -64,6 +76,8 @@ public class ReportService {
     private final ManagerMapper managerMapper;
     private final PhotoMapper photoMapper;
     private final PhotoFiles photoFiles;
+    /** {@link #MAX_PHOTO_BYTES}; a field only so a test can use a small limit. */
+    long maxPhotoBytes = MAX_PHOTO_BYTES;
 
     public ReportService(SiteMapper siteMapper, ManagerMapper managerMapper, PhotoMapper photoMapper,
                          PhotoFiles photoFiles) {
@@ -113,10 +127,11 @@ public class ReportService {
             PdfWriter.getInstance(document, out);
             document.open();
             writeHeader(document, site, from, to, inspections, resultsByInspection, truncated);
+            PhotoBudget budget = new PhotoBudget(maxPhotoBytes);
             for (ReportInspectionRow inspection : inspections) {
                 writeInspection(document, inspection,
                         resultsByInspection.getOrDefault(inspection.id(), List.of()),
-                        photosByInspection.getOrDefault(inspection.id(), List.of()));
+                        photosByInspection.getOrDefault(inspection.id(), List.of()), budget);
             }
         } catch (DocumentException e) {
             throw new IllegalStateException("Could not build the PDF report", e);
@@ -154,7 +169,8 @@ public class ReportService {
     }
 
     private void writeInspection(Document document, ReportInspectionRow inspection,
-                                 List<ReportResultRow> results, List<Photo> photos) throws DocumentException {
+                                 List<ReportResultRow> results, List<Photo> photos, PhotoBudget budget)
+            throws DocumentException {
         Paragraph heading = new Paragraph(inspection.templateName(), HEADING);
         heading.setSpacingBefore(18);
         document.add(heading);
@@ -186,14 +202,14 @@ public class ReportService {
         document.add(table);
 
         if (!photos.isEmpty()) {
-            writePhotos(document, results, photos);
+            writePhotos(document, results, photos, budget);
         }
         writeSignature(document, inspection);
     }
 
     /** Evidence photos, three per row, each captioned with its item number. */
-    private void writePhotos(Document document, List<ReportResultRow> results, List<Photo> photos)
-            throws DocumentException {
+    private void writePhotos(Document document, List<ReportResultRow> results, List<Photo> photos,
+                             PhotoBudget budget) throws DocumentException {
         Map<Long, Integer> positionByItem = results.stream()
                 .collect(Collectors.toMap(ReportResultRow::templateItemId, ReportResultRow::position));
 
@@ -204,12 +220,18 @@ public class ReportService {
             PdfPCell cell = new PdfPCell();
             cell.setBorder(PdfPCell.NO_BORDER);
             cell.setPadding(4);
-            Optional<Image> image = photoFiles.read(photo.getS3Key()).flatMap(ReportService::toImage);
-            if (image.isPresent()) {
-                image.get().scaleToFit(160, 160);
-                cell.addElement(image.get());
+            if (budget.isUsedUp()) {
+                cell.addElement(new Paragraph("[photo left out - report size limit; choose a shorter period]", SMALL));
             } else {
-                cell.addElement(new Paragraph("[photo unavailable]", SMALL));
+                Optional<byte[]> bytes = photoFiles.read(photo.getS3Key());
+                bytes.ifPresent(b -> budget.use(b.length));
+                Optional<Image> image = bytes.flatMap(ReportService::toImage);
+                if (image.isPresent()) {
+                    image.get().scaleToFit(160, 160);
+                    cell.addElement(image.get());
+                } else {
+                    cell.addElement(new Paragraph("[photo unavailable]", SMALL));
+                }
             }
             cell.addElement(new Paragraph("Item " + positionByItem.getOrDefault(photo.getTemplateItemId(), 0)
                     + " · " + DAY_TIME.format(photo.getTakenAt().atZoneSameInstant(ManagerService.SITE_ZONE)), SMALL));
@@ -230,6 +252,34 @@ public class ReportService {
             document.add(signature.get());
         } else {
             document.add(new Paragraph("[signature could not be displayed]", SMALL));
+        }
+    }
+
+    /** Photo bytes still allowed in this report. */
+    private static final class PhotoBudget {
+        private long remaining;
+
+        PhotoBudget(long limit) {
+            this.remaining = limit;
+        }
+
+        boolean isUsedUp() {
+            return remaining <= 0;
+        }
+
+        void use(long bytes) {
+            remaining -= bytes;
+        }
+    }
+
+    private static BaseFont embeddedFont(String resource) {
+        try (InputStream in = ReportService.class.getClassLoader().getResourceAsStream(resource)) {
+            if (in == null) {
+                throw new IllegalStateException("Font " + resource + " is missing from the classpath");
+            }
+            return BaseFont.createFont(resource, BaseFont.IDENTITY_H, BaseFont.EMBEDDED, true, in.readAllBytes(), null);
+        } catch (IOException | DocumentException e) {
+            throw new IllegalStateException("Could not load font " + resource, e);
         }
     }
 

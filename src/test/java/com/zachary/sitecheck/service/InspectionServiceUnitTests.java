@@ -28,6 +28,7 @@ import com.zachary.sitecheck.mapper.TemplateItemMapper;
 import com.zachary.sitecheck.security.AuthUser;
 import com.zachary.sitecheck.support.MybatisLambdaSupport;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeAll;
@@ -81,7 +82,7 @@ class InspectionServiceUnitTests {
     @Test
     void storesANewInspectionWithoutPhotos() {
         SubmitInspectionRequest request = request(List.of(pass(10L), pass(11L)), List.of());
-        when(inspectionMapper.selectOne(any())).thenReturn(null, stored(request.id(), AOIFE.id()));
+        when(inspectionMapper.selectOne(any())).thenReturn(null, stored(request, AOIFE.id()));
         when(inspectionMapper.insertIfAbsent(any())).thenReturn(1);
 
         InspectionService.SubmitOutcome outcome = service.submit(AOIFE, request);
@@ -96,7 +97,7 @@ class InspectionServiceUnitTests {
     void concurrentRetryThatWinsTheInsertGetsTheSameReceipt() {
         SubmitInspectionRequest request = request(List.of(pass(10L), pass(11L)), List.of());
         // Not there when we first look, but another request stored it before our insert.
-        when(inspectionMapper.selectOne(any())).thenReturn(null, stored(request.id(), AOIFE.id()));
+        when(inspectionMapper.selectOne(any())).thenReturn(null, stored(request, AOIFE.id()));
         when(inspectionMapper.insertIfAbsent(any())).thenReturn(0);
 
         InspectionService.SubmitOutcome outcome = service.submit(AOIFE, request);
@@ -108,7 +109,8 @@ class InspectionServiceUnitTests {
     @Test
     void unassignedSiteIsRejectedBeforeAnythingIsStored() {
         SubmitInspectionRequest request = request(List.of(pass(10L)), List.of());
-        doThrow(ApiException.forbidden("Not assigned")).when(siteAccessService).requireAssigned(AOIFE, SITE);
+        doThrow(ApiException.forbidden("Not assigned")).when(siteAccessService)
+                .requireCanSubmit(AOIFE, SITE, request.startedAt());
 
         assertThatThrownBy(() -> service.submit(AOIFE, request)).isInstanceOf(ApiException.class);
         verify(inspectionMapper, never()).insertIfAbsent(any());
@@ -146,11 +148,48 @@ class InspectionServiceUnitTests {
     @Test
     void reusedIdOfAnotherInspectorsInspectionIsConflict() {
         SubmitInspectionRequest request = request(List.of(pass(10L)), List.of());
-        when(inspectionMapper.selectOne(any())).thenReturn(stored(request.id(), 99L));
+        when(inspectionMapper.selectOne(any())).thenReturn(stored(request, 99L));
 
         assertThatThrownBy(() -> service.submit(AOIFE, request))
                 .isInstanceOfSatisfying(ApiException.class,
                         e -> assertThat(e.getStatus()).isEqualTo(HttpStatus.CONFLICT));
+    }
+
+    @Test
+    void sameIdWithDifferentContentIsConflict() {
+        SubmitInspectionRequest request = request(List.of(pass(10L)), List.of());
+        Inspection storedEarlier = stored(request, AOIFE.id());
+        storedEarlier.setSubmittedAt(NOW.minusDays(1));  // the phone signed something else under this id
+        when(inspectionMapper.selectOne(any())).thenReturn(storedEarlier);
+
+        assertThatThrownBy(() -> service.submit(AOIFE, request))
+                .isInstanceOfSatisfying(ApiException.class, e -> {
+                    assertThat(e.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(e.getMessage()).isEqualTo("Inspection id already used for a different inspection");
+                });
+    }
+
+    @Test
+    void retryWithSameSigningTimeInAnotherZoneIsTheSameInspection() {
+        SubmitInspectionRequest request = request(List.of(pass(10L)), List.of());
+        Inspection storedEarlier = stored(request, AOIFE.id());
+        // Postgres hands timestamptz back in UTC; the phone sent Irish summer time.
+        storedEarlier.setSubmittedAt(request.submittedAt().withOffsetSameInstant(ZoneOffset.UTC));
+        when(inspectionMapper.selectOne(any())).thenReturn(storedEarlier);
+
+        assertThat(service.submit(AOIFE, request).created()).isFalse();
+    }
+
+    @Test
+    void signingTimeRoundedToMicrosecondsByTheDatabaseStillMatches() {
+        SubmitInspectionRequest sent = request(List.of(pass(10L)), List.of());
+        SubmitInspectionRequest request = new SubmitInspectionRequest(sent.id(), SITE, TEMPLATE, sent.startedAt(),
+                NOW.withNano(739_441_700), sent.signaturePng(), sent.results(), sent.photos());
+        Inspection storedEarlier = stored(request, AOIFE.id());
+        storedEarlier.setSubmittedAt(NOW.withNano(739_442_000));  // what Postgres keeps
+        when(inspectionMapper.selectOne(any())).thenReturn(storedEarlier);
+
+        assertThat(service.submit(AOIFE, request).created()).isFalse();
     }
 
     // ---------------------------------------------------------------- helpers
@@ -188,10 +227,14 @@ class InspectionServiceUnitTests {
         return item;
     }
 
-    private static Inspection stored(UUID id, long inspectorId) {
+    /** The row a first upload of this request would have stored. */
+    private static Inspection stored(SubmitInspectionRequest request, long inspectorId) {
         Inspection inspection = new Inspection();
-        inspection.setId(id);
+        inspection.setId(request.id());
         inspection.setInspectorId(inspectorId);
+        inspection.setSiteId(request.siteId());
+        inspection.setTemplateId(request.templateId());
+        inspection.setSubmittedAt(request.submittedAt());
         inspection.setReceivedAt(NOW);
         return inspection;
     }

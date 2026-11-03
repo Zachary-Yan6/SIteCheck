@@ -124,6 +124,12 @@
 			<artifactId>openpdf</artifactId>
 			<version>${openpdf.version}</version>
 		</dependency>
+		<!-- Liberation Sans for the PDF report: covers Central/Eastern European letters Helvetica lacks -->
+		<dependency>
+			<groupId>com.github.librepdf</groupId>
+			<artifactId>openpdf-fonts-extra</artifactId>
+			<version>${openpdf.version}</version>
+		</dependency>
 
 		<!-- API docs -->
 		<dependency>

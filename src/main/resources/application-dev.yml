@@ -1,0 +1,12 @@
+# Local development only (./mvnw spring-boot:run -Dspring-boot.run.profiles=dev, or docker compose).
+# Never activate this profile in a deployed environment: it creates demo accounts with a public password.
+spring:
+  flyway:
+    # db/demo holds the demo users, sites and assignments listed in the README.
+    locations: classpath:db/migration,classpath:db/demo
+
+sitecheck:
+  jwt:
+    secret: ${JWT_SECRET:local-dev-secret-change-me-0123456789abcdef}
+    # The secret above is public in this repo; JwtProperties refuses it unless this is set.
+    allow-dev-secret: true
